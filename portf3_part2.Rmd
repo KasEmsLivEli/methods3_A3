@@ -13,7 +13,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 #loading data and packages
 df <- read_csv("scaled_data.csv")
-pacman::p_load(groupdata2, cvms, dplyr, tidyverse, lmerTest, caret, kernlab, recipes, tidymodels, parsnip)
+pacman::p_load(groupdata2, cvms, dplyr, tidyverse, lmerTest, caret, kernlab, recipes, parsnip, lme4, tidymodels)
 
 #Grouping each variable by participant to achieve a single datapoint (instead of 8)
 grouped_iqr <- aggregate(x = df$Iqr, by = list(df$uID), FUN = mean, na.rm=T) %>% dplyr::rename(iqr=x)
@@ -22,39 +22,24 @@ grouped_pauseDuration <- aggregate(x = df$pauseduration, by = list(df$uID), FUN 
 grouped_propSpokenTime <- aggregate(x = df$propspoken, by = list(df$uID), FUN = mean, na.rm=T) %>% dplyr::rename(propspoken=x)
 grouped_speechrate <- aggregate(x = df$Art_rate_syl_speechpresent, by = list(df$uID), FUN = mean, na.rm=T) %>% dplyr::rename(speechrate=x)
 grouped_diagnosis <- aggregate(x = as.numeric(df$Diagnosis), by = list(df$uID), FUN = mean, na.rm=T) %>% dplyr::rename(diagnosis=x)
-grouped_study <- aggregate(x = as.numeric(df$Study.x), by = list(df$uID), FUN = mean, na.rm=T) %>% dplyr::rename(study=x)
-
-#creating one large dataframe with all the grouped variables by merging
-merged_grouped <- merge(grouped_iqr, grouped_pauseDuration, by="Group.1")
-merged_grouped <- merge(merged_grouped, grouped_propSpokenTime, by="Group.1")
-merged_grouped <- merge(merged_grouped, grouped_speechrate, by="Group.1")
-merged_grouped <- merge(merged_grouped, grouped_sd, by="Group.1")
-merged_grouped <- merge(merged_grouped, grouped_study, by="Group.1")
-merged_grouped <- merge(merged_grouped, grouped_diagnosis, by="Group.1")
-
-# Changing Group.1 collumn name to uID
-groupedData <- merged_grouped %>% dplyr::rename(ID=Group.1)
-
-
-## Saving grouped data as csv file
 write_csv(groupedData, "groupedData.csv")
+
 ```
 
 
 
 ```{r}
 df <- read_csv("groupedData.csv")
-
 ##feature preprocessing:
 #partioning using package groupdata2. data is subset into two by cat_cols
 df_list <- partition(df, p = 0.2, cat_col = c("diagnosis",'study'), list_out = T)
 
-#defining test set and removing ID and study column
+#defining test set and removing ID and study column, so they aren't scaled
 df_test <- df_list[[1]]
 df_test <- df_test %>% 
   select(-ID, -study)
 
-#defining train set and removing ID and study column
+#defining train set and removing ID and study column, so they aren't scaled
 df_train <- df_list[[2]]
 df_train <- df_train %>% 
   select(-ID, -study)
@@ -62,8 +47,6 @@ df_train <- df_train %>%
 
 #defining the recipe for train-data
 #the na's are removed so no need to check for missing values
-pacman::p_load(recipes)
-
 rec <- df_train %>% recipe(diagnosis ~ .) %>% # defines outcome of pre-processing
   step_center(all_numeric()) %>% # centering all numeric values
   step_scale(all_numeric()) %>% # scaling all numeric values
@@ -71,40 +54,67 @@ rec <- df_train %>% recipe(diagnosis ~ .) %>% # defines outcome of pre-processin
   prep(training = df_train) # defining the train-set
 
 #extracting finalized (with applied operations) 'df_train' from rec (the recipe)
-train_baked <- juice(rec) 
-test_baked <- rec %>% bake(df_test) ##why are they doing this? what is happening here
-#bake function applies recipe operations to a df to create a design matrix
+train_juiced <- juice(rec) #juice is essentially scaling by mean and sd of train data
+test_baked <- rec %>% bake(df_test) #bake function is using the scaling from the ''juiced'' trained data
+
 ```
 
 
 ```{r}
 ##model training step 0
 #sidestep, diagnosis (the outcome) has to be a factor for classification step below
-train_baked$diagnosis <- as.factor(train_baked$diagnosis)
+train_juiced$diagnosis <- as.factor(train_juiced$diagnosis)
+test_baked$diagnosis <- as.factor(test_baked$diagnosis)
 
-#defining model
+#defining model for log reg and SVM
 log_fit <- 
   logistic_reg() %>% 
   set_mode("classification") %>% 
   set_engine("glm") %>% 
-  fit(diagnosis ~ ., data = train_baked)
+  fit(diagnosis ~ ., data = train_juiced)
 
+svm_fit <- 
+  svm_rbf() %>% 
+  set_mode("classification") %>% 
+  set_engine("kernlab") %>%
+  fit(diagnosis ~ ., data = train_juiced)
 
-##Ok, så jeg tror det er her, man skal fyre crossvalidations ind for at teste training modellen, men Orla's gruppe har ikke gjort det, de har forsat med næste skridt (model assessment)
-df$ID <- as.factor(df$ID)
-df <- fold(df, k = 5, cat_col = 'diagnosis', id_col = 'ID') %>% arrange(.folds)
-CV3 <- cross_validate(df, log_fit, fold_cols = ".folds", family = "binomial") #doesnt work, y tho
-
-
-#investigating model/model assessment: slide 11
-test_results <- 
-  test_baked %>% 
-  select(diagnosis) %>% 
+#investigating model/model assessment: slide 11 in the part two powerpoint
+test_results <-
+  df_test %>%
+  as_tibble() %>% 
   mutate(
     log_class = predict(log_fit, new_data = test_baked) %>% 
-      pull(.pred_class),
-    log_prob  = predict(log_fit, new_data = test_baked, type = "prob") %>% 
-      pull(.pred_1)
-  ) #doesnt work, y tho?
+      pull (.pred_class),
+    log_prob = predict(log_fit, new_data = test_baked, type = "prob") %>% 
+      pull (.pred_1.01605975626787),
+    
+    svm_class = predict(svm_fit, new_data = test_baked) %>% 
+      pull (.pred_class),
+    svm_prob = predict(svm_fit, new_data = test_baked, type = "prob") %>% 
+      pull (.pred_1.01605975626787)
+    )
+
+#investigating metrics
+#convert log_class numeric
+test_results$log_class <- as.numeric(test_results$log_class)
+
+metrics(test_results, truth = diagnosis, estimate = log_class) %>% 
+  knitr::kable()
+
+test_results %>%
+  select(diagnosis, log_class, log_prob) %>%
+  knitr::kable()
+
+
+#Plotting area-under-the-curve (ROC-curve)
+  #change diagnosis to factor first
+test_results$diagnosis <- as.factor(test_results$diagnosis)
+
+test_results %>%
+  roc_curve(truth = diagnosis, log_prob) %>%
+  autoplot()
+
 ```
+
 
