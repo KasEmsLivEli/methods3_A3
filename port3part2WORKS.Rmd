@@ -1,0 +1,105 @@
+---
+title: "portfolio_3_part_2"
+author: "Elisabet, Kasper, Emma-Louise og Liv"
+date: "3/11/2020"
+output: html_document
+---
+
+```{r}
+pacman::p_load(cvms, groupdata2, dplyr, knitr, e1071, tidyverse)
+df <- read_csv("groupedData.csv")
+#Setting seed 
+set.seed(1)
+
+#Creating 5 fold columns with 6 folds each
+df$ID <- as.factor(df$ID)
+
+df1 <- fold(
+  df, 
+  k = 6, 
+  cat_col = 'diagnosis', 
+  id_col = 'ID',
+  num_fold_cols = 5,
+  parallel = FALSE
+)
+
+#order by participant
+df1 <- df1 %>% dplyr::arrange(ID)
+
+#Looking at the first 10 rows
+df1 %>% head(10) %>% kable()
+
+#Splitting the data into train and test sets by picking fold 4 in the first column as the test set
+test_data <- df1 %>% 
+  dplyr::filter(.folds_1 == 4)
+train_data <- df1 %>% 
+  dplyr::filter(.folds_1 != 4)
+
+#classification svm
+clf_svm_model_fn <- function(train_data, formula, hyperparameters) {
+
+  # Update missing hyperparameters with default values
+  hyperparameters <- update_hyperparameters(
+    kernel = "radial",
+    cost = 1,
+    hyperparameters = hyperparameters
+  )
+
+  e1071::svm(
+    formula = formula,
+    data = train_data,
+    kernel = hyperparameters[["kernel"]],
+    cost = hyperparameters[["cost"]],
+    type = "C-classification",
+    probability = TRUE  # Must enable probability here
+  )
+}
+
+# Predict function for binomial SVM
+bnml_svm_predict_fn <- function(test_data, model, formula, hyperparameters, train_data) {
+  # Predict test set
+  predictions <- predict(
+    object = model,
+    newdata = test_data,
+    allow.new.levels = TRUE,
+    probability = TRUE
+  )
+  
+  # Extract probabilities
+  probabilities <- dplyr::as_tibble(attr(predictions, "probabilities"))
+  
+  # Return second column
+  probabilities[[2]]
+}
+
+#Cross-validating binomial outcome
+cv_4 <- cross_validate_fn(
+  data = df1,
+  formulas = c("diagnosis ~ pauseduration + speechrate + propspoken",
+               "diagnosis ~ pauseduration + speechrate",
+               "diagnosis ~ pauseduration",
+               "diagnosis ~ speechrate + propspoken",
+               "diagnosis ~ speechrate",
+               "diagnosis ~ propspoken"),
+  type = "binomial",
+  model_fn = clf_svm_model_fn,
+  predict_fn = bnml_svm_predict_fn,
+  hyperparameters = list(
+    "kernel" = c("linear", "radial"),
+    "cost" = c(1, 5, 10)
+  ),
+  fold_cols = paste0(".folds_", 1:5)
+)
+
+
+cv_4 %>% 
+  dplyr::mutate(`Model ID` = 1:nrow(cv_4)) %>% 
+  dplyr::arrange(dplyr::desc(`Balanced Accuracy`)) %>% 
+  select_definitions(additional_includes = c("Balanced Accuracy", "F1", "MCC", "Model ID")) %>% 
+  kable()
+
+ggplot(cv_4, aes(x = Fixed, y = `Balanced Accuracy`, fill = Fixed)) +
+ stat_summary( geom = "point", shape = 23, colour = "black")+
+  theme_bw()
+```
+
